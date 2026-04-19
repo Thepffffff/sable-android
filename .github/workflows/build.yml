@@ -1,4 +1,4 @@
-name: Build Sable
+name: Build Sable for Android ARM64
 
 on:
   workflow_dispatch:
@@ -22,18 +22,145 @@ jobs:
 
       - name: Patch common/build.gradle for Android ARM64
         run: |
-          # Remove all compileRust tasks and replace buildRustNatives
-          sed -i "/compileRustMacAArch64\|compileRustMacX86\|compileRustLinuxAArch64\|compileRustLinux\|compileRustWindows/d" common/build.gradle
+          cat > common/build.gradle << 'EOF'
+          import org.apache.tools.ant.taskdefs.condition.Os
 
-          # Add Android compile task and patch buildRustNatives
-          sed -i "s/tasks.register('buildRustNatives') {/tasks.register('compileRustAndroidAArch64', Exec) {\n    group = 'rust'\n    workingDir rustProjectDir\n    commandLine dockerCommand\n    args 'cargo', 'zigbuild', '--release', '--target', 'aarch64-linux-android'\n    dependsOn createContainersDirectory\n}\n\ntasks.register('buildRustNatives') {/" common/build.gradle
+          plugins {
+              id 'multiloader-common'
+              id 'net.neoforged.moddev'
+          }
 
-          sed -i "s/dependsOn compileRustMacAArch64, compileRustMacX86, compileRustLinux, compileRustLinuxAArch64, compileRustWindows/dependsOn compileRustAndroidAArch64/" common/build.gradle
+          def rustRootDir = file("src/main/rust")
+          def rustProjectDir = file("$rustRootDir/rapier")
+          def nativesDir = file("src/main/resources/natives/sable_rapier")
+          def cargoCacheDir = project.layout.buildDirectory.file("cargo").get().asFile
+          def docker = Os.isFamily(Os.FAMILY_MAC) ? "/usr/local/bin/docker" : "docker"
+          def dockerCommand = [
+                  docker,
+                  'run',
+                  '--rm',
+                  '-v',
+                  "$rustRootDir:/io",
+                  '-v',
+                  "$cargoCacheDir/git:/usr/local/cargo/git",
+                  '-v',
+                  "$cargoCacheDir/registry:/usr/local/cargo/registry",
+                  '-w',
+                  '/io/rapier',
+                  'sable-build'
+          ]
 
-          # Fix copyRustNatives to only copy Android output
-          sed -i "/aarch64-apple-darwin\|x86_64-apple-darwin\|x86_64-unknown-linux-gnu\|aarch64-unknown-linux-gnu\|x86_64-pc-windows-gnu/d" common/build.gradle
+          tasks.register('createContainersDirectory') {
+              doLast {
+                  if (!cargoCacheDir.exists()) {
+                      cargoCacheDir.mkdirs()
+                  }
+              }
+          }
 
-          sed -i "s/moves.forEach { map ->/def moves = \[\n            \[src: \"target\/aarch64-linux-android\/release\/libsable_rapier.so\", dest: \"sable_rapier_aarch64_linux.so\"\]\n    \]\n\n    moves.forEach { map ->/" common/build.gradle
+          tasks.register('buildImage', Exec) {
+              group = 'rust'
+              workingDir rustRootDir
+              commandLine docker, 'build', '-t', 'sable-build', '.'
+              dependsOn createContainersDirectory
+          }
+
+          tasks.register('cleanRust', Exec) {
+              group = 'rust'
+              workingDir rustProjectDir
+              commandLine dockerCommand
+              args 'cargo', 'clean'
+              dependsOn createContainersDirectory
+          }
+
+          tasks.register('compileRustAndroidAArch64', Exec) {
+              group = 'rust'
+              workingDir rustProjectDir
+              commandLine dockerCommand
+              args 'cargo', 'zigbuild', '--release', '--target', 'aarch64-linux-android'
+              dependsOn createContainersDirectory
+          }
+
+          tasks.register('buildRustNatives') {
+              group = 'build'
+              description = 'Compiles Rust natives for Android ARM64 and moves them to resources.'
+              dependsOn compileRustAndroidAArch64
+              finalizedBy copyRustNatives
+          }
+
+          tasks.register('copyRustNatives', Copy) {
+              group = 'rust'
+              into nativesDir
+              mustRunAfter(buildRustNatives)
+
+              def moves = [
+                      [src: "target/aarch64-linux-android/release/libsable_rapier.so", dest: "sable_rapier_aarch64_linux.so"]
+              ]
+
+              moves.forEach { map ->
+                  from(file("$rustProjectDir/${map.src}")) {
+                      rename { map.dest }
+                  }
+              }
+          }
+
+          tasks.register('copyRustNativesDev', Copy) {
+              group = 'rust'
+              into nativesDir
+              mustRunAfter(compileRust)
+
+              def moves = [
+                      [src: "target/debug/libsable_rapier.so", dest: "sable_rapier_aarch64_linux.so"]
+              ]
+              moves.forEach { map ->
+                  from(file("$rustProjectDir/${map.src}")) {
+                      rename { map.dest }
+                  }
+              }
+          }
+
+          neoForge {
+              neoFormVersion = neo_form_version
+              def at = file('src/main/resources/META-INF/accesstransformer.cfg')
+              if (at.exists()) {
+                  accessTransformers.from(at.absolutePath)
+              }
+              parchment {
+                  minecraftVersion = parchment_minecraft
+                  mappingsVersion = parchment_version
+              }
+          }
+
+          configurations {
+              commonJava {
+                  canBeResolved = false
+                  canBeConsumed = true
+              }
+              commonResources {
+                  canBeResolved = false
+                  canBeConsumed = true
+              }
+          }
+
+          artifacts {
+              commonJava sourceSets.main.java.sourceDirectories.singleFile
+              commonResources sourceSets.main.resources.sourceDirectories.singleFile
+          }
+
+          dependencies {
+              compileOnly "org.spongepowered:mixin:0.8.5"
+              compileOnly "io.github.llamalad7:mixinextras-common:0.5.3"
+              annotationProcessor "io.github.llamalad7:mixinextras-common:0.5.3"
+              api "dev.ryanhcode.sable-companion:sable-companion-common-$minecraft_version:$sable_companion_version"
+              implementation("foundry.veil:veil-common-${project.minecraft_version}:${project.veil_version}") {
+                  exclude group: "maven.modrinth"
+              }
+              compileOnly("fuzs.forgeconfigapiport:forgeconfigapiport-fabric:${forgeconfigapiport_version}") {
+                  transitive = false
+              }
+              implementation "fuzs.forgeconfigapiport:forgeconfigapiport-common-neoforgeapi:${forgeconfigapiport_version}"
+          }
+          EOF
 
       - name: Build Docker Image
         run: ./gradlew common:buildImage
