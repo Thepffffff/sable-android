@@ -1,0 +1,12 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.thepf.sable.android.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "SableAndroidLibsMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
