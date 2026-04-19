@@ -1,4 +1,4 @@
-name: Build Sable for Android ARM64
+name: Build Sable
 
 on:
   workflow_dispatch:
@@ -20,40 +20,33 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: Setup Android NDK r27c
-        id: setup-ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r27c
-          add-to-path: true
-
-      - name: Setup Rust with Android target
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android
-
-      - name: Configure Cargo for Android NDK
+      - name: Patch common/build.gradle for Android ARM64
         run: |
-          mkdir -p ~/.cargo
-          cat > ~/.cargo/config.toml << EOF
-          [target.aarch64-linux-android]
-          linker = "${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
-          ar = "${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
-          EOF
+          # Remove all compileRust tasks and replace buildRustNatives
+          sed -i "/compileRustMacAArch64\|compileRustMacX86\|compileRustLinuxAArch64\|compileRustLinux\|compileRustWindows/d" common/build.gradle
 
-      - name: Setup .NET (for BepuPhysics2 submodule)
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0'
+          # Add Android compile task and patch buildRustNatives
+          sed -i "s/tasks.register('buildRustNatives') {/tasks.register('compileRustAndroidAArch64', Exec) {\n    group = 'rust'\n    workingDir rustProjectDir\n    commandLine dockerCommand\n    args 'cargo', 'zigbuild', '--release', '--target', 'aarch64-linux-android'\n    dependsOn createContainersDirectory\n}\n\ntasks.register('buildRustNatives') {/" common/build.gradle
+
+          sed -i "s/dependsOn compileRustMacAArch64, compileRustMacX86, compileRustLinux, compileRustLinuxAArch64, compileRustWindows/dependsOn compileRustAndroidAArch64/" common/build.gradle
+
+          # Fix copyRustNatives to only copy Android output
+          sed -i "/aarch64-apple-darwin\|x86_64-apple-darwin\|x86_64-unknown-linux-gnu\|aarch64-unknown-linux-gnu\|x86_64-pc-windows-gnu/d" common/build.gradle
+
+          sed -i "s/moves.forEach { map ->/def moves = \[\n            \[src: \"target\/aarch64-linux-android\/release\/libsable_rapier.so\", dest: \"sable_rapier_aarch64_linux.so\"\]\n    \]\n\n    moves.forEach { map ->/" common/build.gradle
 
       - name: Build Docker Image
         run: ./gradlew common:buildImage
 
-      - name: Build Rust Natives for Android
+      - name: Add Android Rust target to Docker image
+        run: |
+          CONTAINER=$(docker run -d sable-build sleep 60)
+          docker exec $CONTAINER rustup target add aarch64-linux-android
+          docker commit $CONTAINER sable-build
+          docker stop $CONTAINER
+
+      - name: Build Rust Natives for Android ARM64
         run: ./gradlew common:buildRustNatives
-        env:
-          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
-          RUST_TARGET: aarch64-linux-android
 
       - name: Build Full Mod
         run: ./gradlew build
