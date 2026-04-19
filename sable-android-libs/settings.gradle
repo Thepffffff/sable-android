@@ -1,0 +1,5 @@
+rootProject.name = 'sable-android-libs'
+
+include 'common'
+include 'neoforge'
+include 'fabric'
