@@ -1,0 +1,12 @@
+dependencies {
+    implementation project(':common')
+    compileOnly "org.spongepowered:mixin:0.8.5"
+    compileOnly "net.fabricmc:fabric-loader:0.15.0"
+}
+
+jar {
+    from project(':common').sourceSets.main.output
+    manifest {
+        attributes(['MixinConfigs': 'sableandroidlibs-fabric.mixins.json'])
+    }
+}
