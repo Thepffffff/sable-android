@@ -1,0 +1,11 @@
+dependencies {
+    implementation project(':common')
+    compileOnly "org.spongepowered:mixin:0.8.5"
+}
+
+jar {
+    from project(':common').sourceSets.main.output
+    manifest {
+        attributes(['MixinConfigs': 'sableandroidlibs-neoforge.mixins.json'])
+    }
+}
