@@ -20,26 +20,42 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: Setup Rust
+      - name: Setup Android NDK r27c
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: true
+
+      - name: Setup Rust with Android target
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
 
-      - name: Setup Android NDK
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r27c
-
-      - name: Configure Cargo for Android
+      - name: Configure Cargo for Android NDK
         run: |
           mkdir -p ~/.cargo
-          echo '[target.aarch64-linux-android]' >> ~/.cargo/config.toml
-          echo 'linker = "${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"' >> ~/.cargo/config.toml
+          cat > ~/.cargo/config.toml << EOF
+          [target.aarch64-linux-android]
+          linker = "${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
+          ar = "${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+          EOF
 
-      - name: Build Rust Natives
+      - name: Setup .NET (for BepuPhysics2 submodule)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0'
+
+      - name: Build Docker Image
+        run: ./gradlew common:buildImage
+
+      - name: Build Rust Natives for Android
         run: ./gradlew common:buildRustNatives
+        env:
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
+          RUST_TARGET: aarch64-linux-android
 
-      - name: Build Mod
+      - name: Build Full Mod
         run: ./gradlew build
 
       - name: Upload Artifacts
@@ -47,4 +63,5 @@ jobs:
         with:
           name: sable-android-arm64
           path: |
-            **/build/libs/*.jar
+            neoforge/build/libs/*.jar
+            fabric/build/libs/*.jar
