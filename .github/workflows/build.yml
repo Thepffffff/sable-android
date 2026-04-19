@@ -20,6 +20,12 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
+      - name: Setup Android NDK r27c
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+
       - name: Patch common/build.gradle for Android ARM64
         run: |
           cat > common/build.gradle << 'EOF'
@@ -34,6 +40,7 @@ jobs:
           def rustProjectDir = file("$rustRootDir/rapier")
           def nativesDir = file("src/main/resources/natives/sable_rapier")
           def cargoCacheDir = project.layout.buildDirectory.file("cargo").get().asFile
+          def ndkPath = System.getenv("ANDROID_NDK_HOME") ?: "/opt/android-ndk"
           def docker = Os.isFamily(Os.FAMILY_MAC) ? "/usr/local/bin/docker" : "docker"
           def dockerCommand = [
                   docker,
@@ -45,6 +52,10 @@ jobs:
                   "$cargoCacheDir/git:/usr/local/cargo/git",
                   '-v',
                   "$cargoCacheDir/registry:/usr/local/cargo/registry",
+                  '-v',
+                  "$ndkPath:/ndk",
+                  '-e',
+                  'ANDROID_NDK_HOME=/ndk',
                   '-w',
                   '/io/rapier',
                   'sable-build'
@@ -77,7 +88,7 @@ jobs:
               group = 'rust'
               workingDir rustProjectDir
               commandLine dockerCommand
-              args 'cargo', 'zigbuild', '--release', '--target', 'aarch64-linux-android'
+              args 'cargo', 'zigbuild', '--release', '--target', 'aarch64-linux-android21'
               dependsOn createContainersDirectory
           }
 
@@ -107,7 +118,6 @@ jobs:
           tasks.register('copyRustNativesDev', Copy) {
               group = 'rust'
               into nativesDir
-              mustRunAfter(compileRust)
 
               def moves = [
                       [src: "target/debug/libsable_rapier.so", dest: "sable_rapier_aarch64_linux.so"]
@@ -174,6 +184,8 @@ jobs:
 
       - name: Build Rust Natives for Android ARM64
         run: ./gradlew common:buildRustNatives
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
       - name: Build Full Mod
         run: ./gradlew build
