@@ -12,30 +12,32 @@ on:
         required: true
         default: '1.21.1'
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
-  # STEP 1: Build the Rust native (.so file)
-  # This runs in the ROOT because it's an external repo
   build-native:
     runs-on: ubuntu-latest
+
     steps:
       - name: Discover and Checkout Sable Tag
         run: |
+          # Manually fetch tags to handle fuzzy matching for naming differences
           git init
           git remote add origin https://github.com/ryanhcode/sable.git
           git fetch --tags origin
           
-          # Match tags like mc1.21.1-1.0.6-fabric
-          TAG_PATTERN="mc${{ github.event.inputs.minecraft_version }}-${{ github.event.inputs.sable_version }}-fabric"
-          MATCHED_TAG=$(git tag -l | grep "$TAG_PATTERN" | head -n 1)
+          VERSION_INPUT="${{ github.event.inputs.sable_version }}"
+          
+          # Prioritize exact match/standard prefix, then fallback to any tag containing the string
+          MATCHED_TAG=$(git tag -l | grep -E "^v?${VERSION_INPUT}([-+]|$)" | head -n 1)
+          if [ -z "$MATCHED_TAG" ]; then
+            MATCHED_TAG=$(git tag -l | grep "${VERSION_INPUT}" | head -n 1)
+          fi
 
           if [ -z "$MATCHED_TAG" ]; then
-            echo "::error::Could not find tag matching $TAG_PATTERN"
+            echo "::error::Could not find a GitHub tag matching version ${VERSION_INPUT}"
             exit 1
           fi
           
+          echo "Found tag: $MATCHED_TAG. Checking out..."
           git checkout $MATCHED_TAG
           git submodule update --init --recursive
 
@@ -51,39 +53,183 @@ jobs:
         with:
           ndk-version: r27c
 
-      - name: Patch common/build.gradle
+      - name: Patch common/build.gradle for Android ARM64 only
         run: |
           cat > common/build.gradle << 'EOF'
-          plugins { id 'multiloader-common'; id 'net.neoforged.moddev' }
+          import org.apache.tools.ant.taskdefs.condition.Os
+
+          plugins {
+              id 'multiloader-common'
+              id 'net.neoforged.moddev'
+          }
+
           def rustRootDir = file("src/main/rust")
-          tasks.register('buildImage', Exec) { commandLine 'docker', 'build', '-t', 'sable-build', rustRootDir }
-          tasks.register('buildRustNatives', Exec) {
-              commandLine 'docker', 'run', '--rm', '-v', "${rustRootDir}:/io", '-v', "${System.getenv("ANDROID_NDK_HOME")}:/ndk", 'sable-build', 'cargo', 'build', '--release', '--target', 'aarch64-linux-android'
+          def rustProjectDir = file("$rustRootDir/rapier")
+          def nativesDir = file("src/main/resources/natives/sable_rapier")
+          def cargoCacheDir = project.layout.buildDirectory.file("cargo").get().asFile
+          def ndkPath = System.getenv("ANDROID_NDK_HOME") ?: "/opt/android-ndk"
+          def docker = Os.isFamily(Os.FAMILY_MAC) ? "/usr/local/bin/docker" : "docker"
+          def dockerCommand = [
+                  docker,
+                  'run',
+                  '--rm',
+                  '-v',
+                  "$rustRootDir:/io",
+                  '-v',
+                  "$cargoCacheDir/git:/usr/local/cargo/git",
+                  '-v',
+                  "$cargoCacheDir/registry:/usr/local/cargo/registry",
+                  '-v',
+                  "$ndkPath:/ndk",
+                  '-e',
+                  'CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang',
+                  '-e',
+                  'CARGO_TARGET_AARCH64_LINUX_ANDROID_AR=/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar',
+                  '-e',
+                  'CC_aarch64_linux_android=/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang',
+                  '-w',
+                  '/io/rapier',
+                  'sable-build'
+          ]
+
+          tasks.register('createContainersDirectory') {
+              doLast {
+                  if (!cargoCacheDir.exists()) {
+                      cargoCacheDir.mkdirs()
+                  }
+              }
+          }
+
+          tasks.register('buildImage', Exec) {
+              group = 'rust'
+              workingDir rustRootDir
+              commandLine docker, 'build', '-t', 'sable-build', '.'
+              dependsOn createContainersDirectory
+          }
+
+          tasks.register('cleanRust', Exec) {
+              group = 'rust'
+              workingDir rustProjectDir
+              commandLine dockerCommand
+              args 'cargo', 'clean'
+              dependsOn createContainersDirectory
+          }
+
+          tasks.register('compileRustAndroidAArch64', Exec) {
+              group = 'rust'
+              workingDir rustProjectDir
+              commandLine dockerCommand
+              args 'cargo', 'build', '--release', '--target', 'aarch64-linux-android'
+              dependsOn createContainersDirectory
+          }
+
+          tasks.register('buildRustNatives') {
+              group = 'build'
+              description = 'Compiles Rust natives for Android ARM64 and moves them to resources.'
+              dependsOn compileRustAndroidAArch64
+              finalizedBy copyRustNatives
+          }
+
+          tasks.register('copyRustNatives', Copy) {
+              group = 'rust'
+              into nativesDir
+              mustRunAfter(buildRustNatives)
+
+              def moves = [
+                      [src: "target/aarch64-linux-android/release/libsable_rapier.so", dest: "sable_rapier_aarch64_linux.so"]
+              ]
+
+              moves.forEach { map ->
+                  from(file("$rustProjectDir/${map.src}")) {
+                      rename { map.dest }
+                  }
+              }
+          }
+
+          tasks.register('copyRustNativesDev', Copy) {
+              group = 'rust'
+              into nativesDir
+
+              def moves = [
+                      [src: "target/debug/libsable_rapier.so", dest: "sable_rapier_aarch64_linux.so"]
+              ]
+              moves.forEach { map ->
+                  from(file("$rustProjectDir/${map.src}")) {
+                      rename { map.dest }
+                  }
+              }
+          }
+
+          neoForge {
+              neoFormVersion = neo_form_version
+              def at = file('src/main/resources/META-INF/accesstransformer.cfg')
+              if (at.exists()) {
+                  accessTransformers.from(at.absolutePath)
+              }
+              parchment {
+                  minecraftVersion = parchment_minecraft
+                  mappingsVersion = parchment_version
+              }
+          }
+
+          configurations {
+              commonJava {
+                  canBeResolved = false
+                  canBeConsumed = true
+              }
+              commonResources {
+                  canBeResolved = false
+                  canBeConsumed = true
+              }
+          }
+
+          artifacts {
+              commonJava sourceSets.main.java.sourceDirectories.singleFile
+              commonResources sourceSets.main.resources.sourceDirectories.singleFile
+          }
+
+          dependencies {
+              compileOnly "org.spongepowered:mixin:0.8.5"
+              compileOnly "io.github.llamalad7:mixinextras-common:0.5.3"
+              annotationProcessor "io.github.llamalad7:mixinextras-common:0.5.3"
+              api "dev.ryanhcode.sable-companion:sable-companion-common-$minecraft_version:$sable_companion_version"
+              implementation("foundry.veil:veil-common-${project.minecraft_version}:${project.veil_version}") {
+                  exclude group: "maven.modrinth"
+              }
+              compileOnly("fuzs.forgeconfigapiport:forgeconfigapiport-fabric:${forgeconfigapiport_version}") {
+                  transitive = false
+              }
+              implementation "fuzs.forgeconfigapiport:forgeconfigapiport-common-neoforgeapi:${forgeconfigapiport_version}"
           }
           EOF
 
-      - name: Build Rust Natives
+      - name: Build Docker Image
+        run: ./gradlew common:buildImage
+
+      - name: Add Android Rust target to Docker image
         run: |
-          ./gradlew common:buildImage
-          ./gradlew common:buildRustNatives
+          CONTAINER=$(docker run -d sable-build sleep 60)
+          docker exec $CONTAINER rustup target add aarch64-linux-android
+          docker commit $CONTAINER sable-build
+          docker stop $CONTAINER
+
+      - name: Build Rust Natives for Android ARM64
+        run: ./gradlew common:buildRustNatives
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
-      - name: Upload native
+      - name: Upload native as artifact
         uses: actions/upload-artifact@v4
         with:
           name: android-native
-          path: src/main/rust/rapier/target/aarch64-linux-android/release/libsable_rapier.so
+          path: common/src/main/resources/natives/sable_rapier/sable_rapier_aarch64_linux.so
 
-  # STEP 2: Build NeoForge Mod
   build-neoforge:
     runs-on: ubuntu-latest
     needs: build-native
-    defaults:
-      run:
-        working-directory: sable-android-libs
+
     steps:
-      - name: Checkout Code
+      - name: Checkout our repo
         uses: actions/checkout@v4
 
       - name: Setup Java 21
@@ -92,43 +238,97 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Download Native
+      - name: Download compiled native
         uses: actions/download-artifact@v4
         with:
           name: android-native
-          path: sable-android-libs/neoforge/src/main/resources/natives/sable_rapier/
+          path: sable-android-libs/neoforge/src/main/resources/natives/sable_rapier_android/
 
-      - name: Download Sable for Classpath
+      - name: Download Sable NeoForge jar for compilation
+        env:
+          SABLE_VERSION: ${{ github.event.inputs.sable_version }}
+          MC_VERSION: ${{ github.event.inputs.minecraft_version }}
+          LOADER: "neoforge"
+        run: |
+          mkdir -p sable-android-libs/libs
+          curl -s -G \
+            --data-urlencode "game_versions=[\"${MC_VERSION}\"]" \
+            --data-urlencode "loaders=[\"${LOADER}\"]" \
+            "https://api.modrinth.com/v2/project/sable/version" \
+            -o versions.json
+          
+          DOWNLOAD_URL=$(python3 -c "
+          import json, os, sys
+          with open('versions.json') as f:
+              versions = json.load(f)
+          target = os.environ['SABLE_VERSION']
+          for v in versions:
+              if target in v['version_number']:
+                  for f in v['files']:
+                      if f['filename'].endswith('.jar') and not any(x in f['filename'] for x in ['-sources', '-dev', '-api']):
+                          print(f['url'])
+                          sys.exit(0)
+          sys.exit(1)
+          ")
+          echo "Downloading from: $DOWNLOAD_URL"
+          curl -L "$DOWNLOAD_URL" -o sable-android-libs/libs/sable.jar
+
+      - name: Generate neoforge.mods.toml
         env:
           SABLE_VERSION: ${{ github.event.inputs.sable_version }}
           MC_VERSION: ${{ github.event.inputs.minecraft_version }}
         run: |
-          mkdir -p libs
-          curl -s -G --data-urlencode "game_versions=[\"$MC_VERSION\"]" --data-urlencode "loaders=[\"neoforge\"]" "https://api.modrinth.com/v2/project/sable/version" -o versions.json
-          URL=$(python3 -c "import json, os; v=json.load(open('versions.json')); print([f['url'] for v_ in v if os.environ['SABLE_VERSION'] in v_['version_number'] for f in v_['files'] if f['filename'].endswith('.jar') and '-sources' not in f['filename']][0])")
-          curl -L "$URL" -o libs/sable.jar
+          mkdir -p sable-android-libs/neoforge/src/main/resources/META-INF
+          cat > sable-android-libs/neoforge/src/main/resources/META-INF/neoforge.mods.toml << EOF
+          modLoader="javafml"
+          loaderVersion="[4,)"
+          license="Polyform-Shield-1.0.0"
 
-      - name: Build Mod
-        run: gradle :neoforge:build
+          [[mods]]
+          modId="sableandroidlibs"
+          version="${SABLE_VERSION}"
+          displayName="Sable Android Libs"
+          description="Injects Android-compiled Rapier natives into Sable."
 
-      - name: Upload Jar
+          [[dependencies.sableandroidlibs]]
+          modId="sable"
+          type="required"
+          versionRange="[${SABLE_VERSION},${SABLE_VERSION}]"
+          ordering="AFTER"
+          side="BOTH"
+
+          [[dependencies.sableandroidlibs]]
+          modId="neoforge"
+          type="required"
+          versionRange="[21.1,)"
+          ordering="NONE"
+          side="BOTH"
+
+          [[dependencies.sableandroidlibs]]
+          modId="minecraft"
+          type="required"
+          versionRange="[${MC_VERSION},)"
+          ordering="NONE"
+          side="BOTH"
+          EOF
+
+      - name: Build NeoForge jar
+        run: |
+          cd sable-android-libs
+          gradle neoforge:build
+
+      - name: Upload NeoForge jar
         uses: actions/upload-artifact@v4
         with:
-          name: sable-android-libs-neoforge
-          path: sable-android-libs/neoforge/build/libs/!(*-sources|*-dev).jar
+          name: sable-android-libs-neoforge-${{ github.event.inputs.sable_version }}-mc${{ github.event.inputs.minecraft_version }}
+          path: sable-android-libs/neoforge/build/libs/*.jar
 
-  # STEP 3: Build Fabric Mod
   build-fabric:
     runs-on: ubuntu-latest
     needs: build-native
-    defaults:
-      run:
-        working-directory: sable-android-libs
+
     steps:
-      - name: Checkout Code
+      - name: Checkout our repo
         uses: actions/checkout@v4
 
       - name: Setup Java 21
@@ -137,30 +337,76 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Download Native
+      - name: Download compiled native
         uses: actions/download-artifact@v4
         with:
           name: android-native
-          path: sable-android-libs/fabric/src/main/resources/natives/sable_rapier/
+          path: sable-android-libs/fabric/src/main/resources/natives/sable_rapier_android/
 
-      - name: Download Sable for Classpath
+      - name: Download Sable Fabric jar for compilation
+        env:
+          SABLE_VERSION: ${{ github.event.inputs.sable_version }}
+          MC_VERSION: ${{ github.event.inputs.minecraft_version }}
+          LOADER: "fabric"
+        run: |
+          mkdir -p sable-android-libs/libs
+          curl -s -G \
+            --data-urlencode "game_versions=[\"${MC_VERSION}\"]" \
+            --data-urlencode "loaders=[\"${LOADER}\"]" \
+            "https://api.modrinth.com/v2/project/sable/version" \
+            -o versions.json
+          
+          DOWNLOAD_URL=$(python3 -c "
+          import json, os, sys
+          with open('versions.json') as f:
+              versions = json.load(f)
+          target = os.environ['SABLE_VERSION']
+          for v in versions:
+              if target in v['version_number']:
+                  for f in v['files']:
+                      if f['filename'].endswith('.jar') and not any(x in f['filename'] for x in ['-sources', '-dev', '-api']):
+                          print(f['url'])
+                          sys.exit(0)
+          sys.exit(1)
+          ")
+          echo "Downloading from: $DOWNLOAD_URL"
+          curl -L "$DOWNLOAD_URL" -o sable-android-libs/libs/sable.jar
+
+      - name: Generate fabric.mod.json
         env:
           SABLE_VERSION: ${{ github.event.inputs.sable_version }}
           MC_VERSION: ${{ github.event.inputs.minecraft_version }}
         run: |
-          mkdir -p libs
-          curl -s -G --data-urlencode "game_versions=[\"$MC_VERSION\"]" --data-urlencode "loaders=[\"fabric\"]" "https://api.modrinth.com/v2/project/sable/version" -o versions.json
-          URL=$(python3 -c "import json, os; v=json.load(open('versions.json')); print([f['url'] for v_ in v if os.environ['SABLE_VERSION'] in v_['version_number'] for f in v_['files'] if f['filename'].endswith('.jar') and '-sources' not in f['filename']][0])")
-          curl -L "$URL" -o libs/sable.jar
+          mkdir -p sable-android-libs/fabric/src/main/resources
+          python3 -c "
+          import json, os
+          data = {
+            'schemaVersion': 1,
+            'id': 'sableandroidlibs',
+            'version': os.environ['SABLE_VERSION'],
+            'name': 'Sable Android Libs',
+            'description': 'Injects Android-compiled Rapier natives into Sable.',
+            'license': 'Polyform-Shield-1.0.0',
+            'environment': '*',
+            'mixins': ['sableandroidlibs-fabric.mixins.json'],
+            'depends': {
+              'sable': os.environ['SABLE_VERSION'],
+              'fabricloader': '>=0.15.0',
+              'minecraft': os.environ['MC_VERSION']
+            },
+            'loadAfter': [{'id': 'sable'}]
+          }
+          with open('sable-android-libs/fabric/src/main/resources/fabric.mod.json', 'w') as f:
+              json.dump(data, f, indent=2)
+          "
 
-      - name: Build Mod
-        run: gradle :fabric:build
+      - name: Build Fabric jar
+        run: |
+          cd sable-android-libs
+          gradle fabric:build
 
-      - name: Upload Jar
+      - name: Upload Fabric jar
         uses: actions/upload-artifact@v4
         with:
-          name: sable-android-libs-fabric
-          path: sable-android-libs/fabric/build/libs/!(*-sources|*-dev).jar
+          name: sable-android-libs-fabric-${{ github.event.inputs.sable_version }}-mc${{ github.event.inputs.minecraft_version }}
+          path: sable-android-libs/fabric/build/libs/*.jar
