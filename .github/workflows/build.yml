@@ -240,12 +240,13 @@ jobs:
               versions = json.load(f)
           target = os.environ['SABLE_VERSION']
           for v in versions:
-              if v['version_number'] == target:
+              if v['version_number'].startswith(target):
                   for f in v['files']:
                       if f['primary']:
                           print(f['url'])
                           break
           ")
+          echo "Downloading from: $DOWNLOAD_URL"
           curl -L "$DOWNLOAD_URL" -o sable-android-libs/libs/sable.jar
 
       - name: Generate neoforge.mods.toml
@@ -332,12 +333,13 @@ jobs:
               versions = json.load(f)
           target = os.environ['SABLE_VERSION']
           for v in versions:
-              if v['version_number'] == target:
+              if v['version_number'].startswith(target):
                   for f in v['files']:
                       if f['primary']:
                           print(f['url'])
                           break
           ")
+          echo "Downloading from: $DOWNLOAD_URL"
           curl -L "$DOWNLOAD_URL" -o sable-android-libs/libs/sable.jar
 
       - name: Generate fabric.mod.json
