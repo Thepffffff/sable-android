@@ -17,7 +17,7 @@ env:
 
 jobs:
   # STEP 1: Build the Rust native (.so file)
-  # This part is external (ryanhcode/sable), so it stays the same.
+  # This runs in the ROOT because it's an external repo
   build-native:
     runs-on: ubuntu-latest
     steps:
@@ -26,9 +26,16 @@ jobs:
           git init
           git remote add origin https://github.com/ryanhcode/sable.git
           git fetch --tags origin
-          VERSION_INPUT="${{ github.event.inputs.sable_version }}"
-          MATCHED_TAG=$(git tag -l | grep -E "^v?${VERSION_INPUT}([-+]|$)" | head -n 1) || MATCHED_TAG=$(git tag -l | grep "${VERSION_INPUT}" | head -n 1)
-          if [ -z "$MATCHED_TAG" ]; then exit 1; fi
+          
+          # Match tags like mc1.21.1-1.0.6-fabric
+          TAG_PATTERN="mc${{ github.event.inputs.minecraft_version }}-${{ github.event.inputs.sable_version }}-fabric"
+          MATCHED_TAG=$(git tag -l | grep "$TAG_PATTERN" | head -n 1)
+
+          if [ -z "$MATCHED_TAG" ]; then
+            echo "::error::Could not find tag matching $TAG_PATTERN"
+            exit 1
+          fi
+          
           git checkout $MATCHED_TAG
           git submodule update --init --recursive
 
@@ -48,9 +55,10 @@ jobs:
         run: |
           cat > common/build.gradle << 'EOF'
           plugins { id 'multiloader-common'; id 'net.neoforged.moddev' }
-          tasks.register('buildImage', Exec) { commandLine 'docker', 'build', '-t', 'sable-build', 'src/main/rust' }
+          def rustRootDir = file("src/main/rust")
+          tasks.register('buildImage', Exec) { commandLine 'docker', 'build', '-t', 'sable-build', rustRootDir }
           tasks.register('buildRustNatives', Exec) {
-              commandLine 'docker', 'run', '--rm', '-v', "${project.file("src/main/rust")}:/io", '-v', "${System.getenv("ANDROID_NDK_HOME")}:/ndk", 'sable-build', 'cargo', 'build', '--release', '--target', 'aarch64-linux-android'
+              commandLine 'docker', 'run', '--rm', '-v', "${rustRootDir}:/io", '-v', "${System.getenv("ANDROID_NDK_HOME")}:/ndk", 'sable-build', 'cargo', 'build', '--release', '--target', 'aarch64-linux-android'
           }
           EOF
 
@@ -65,13 +73,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: android-native
-          path: common/src/main/rust/rapier/target/aarch64-linux-android/release/libsable_rapier.so
+          path: src/main/rust/rapier/target/aarch64-linux-android/release/libsable_rapier.so
 
   # STEP 2: Build NeoForge Mod
   build-neoforge:
     runs-on: ubuntu-latest
     needs: build-native
-    # This ensures all 'run' commands happen inside your source folder
     defaults:
       run:
         working-directory: sable-android-libs
@@ -92,10 +99,9 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: android-native
-          # Path relative to the workspace root
           path: sable-android-libs/neoforge/src/main/resources/natives/sable_rapier/
 
-      - name: Download Sable Dependency
+      - name: Download Sable for Classpath
         env:
           SABLE_VERSION: ${{ github.event.inputs.sable_version }}
           MC_VERSION: ${{ github.event.inputs.minecraft_version }}
@@ -140,7 +146,7 @@ jobs:
           name: android-native
           path: sable-android-libs/fabric/src/main/resources/natives/sable_rapier/
 
-      - name: Download Sable Dependency
+      - name: Download Sable for Classpath
         env:
           SABLE_VERSION: ${{ github.event.inputs.sable_version }}
           MC_VERSION: ${{ github.event.inputs.minecraft_version }}
