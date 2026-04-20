@@ -47,8 +47,7 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: Setup Android NDK r27c
-        id: setup-ndk
+      - name: Setup Android NDK r27c        id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r27c
@@ -97,8 +96,7 @@ jobs:
                   if (!cargoCacheDir.exists()) {
                       cargoCacheDir.mkdirs()
                   }
-              }
-          }
+              }          }
 
           tasks.register('buildImage', Exec) {
               group = 'rust'
@@ -147,8 +145,7 @@ jobs:
           }
 
           tasks.register('copyRustNativesDev', Copy) {
-              group = 'rust'
-              into nativesDir
+              group = 'rust'              into nativesDir
 
               def moves = [
                       [src: "target/debug/libsable_rapier.so", dest: "sable_rapier_aarch64_linux.so"]
@@ -197,8 +194,7 @@ jobs:
                   exclude group: "maven.modrinth"
               }
               compileOnly("fuzs.forgeconfigapiport:forgeconfigapiport-fabric:${forgeconfigapiport_version}") {
-                  transitive = false
-              }
+                  transitive = false              }
               implementation "fuzs.forgeconfigapiport:forgeconfigapiport-common-neoforgeapi:${forgeconfigapiport_version}"
           }
           EOF
@@ -247,8 +243,7 @@ jobs:
       - name: Download Sable NeoForge jar for compilation
         env:
           SABLE_VERSION: ${{ github.event.inputs.sable_version }}
-          MC_VERSION: ${{ github.event.inputs.minecraft_version }}
-          LOADER: "neoforge"
+          MC_VERSION: ${{ github.event.inputs.minecraft_version }}          LOADER: "neoforge"
         run: |
           mkdir -p sable-android-libs/libs
           curl -s -G \
@@ -297,8 +292,7 @@ jobs:
           ordering="AFTER"
           side="BOTH"
 
-          [[dependencies.sableandroidlibs]]
-          modId="neoforge"
+          [[dependencies.sableandroidlibs]]          modId="neoforge"
           type="required"
           versionRange="[21.1,)"
           ordering="NONE"
@@ -311,6 +305,17 @@ jobs:
           ordering="NONE"
           side="BOTH"
           EOF
+
+      - name: Force .so files to be stored uncompressed in JAR
+        run: |
+          cat >> sable-android-libs/neoforge/build.gradle << 'GRADLE_EOF'
+
+          tasks.withType(Jar).configureEach {
+              filesMatching("**/*.so") {
+                  entryCompression = ZipEntryCompression.STORED
+              }
+          }
+          GRADLE_EOF
 
       - name: Build NeoForge jar
         run: |
@@ -336,7 +341,6 @@ jobs:
         with:
           java-version: '21'
           distribution: 'temurin'
-
       - name: Download compiled native
         uses: actions/download-artifact@v4
         with:
@@ -386,8 +390,7 @@ jobs:
             'version': os.environ['SABLE_VERSION'],
             'name': 'Sable Android Libs',
             'description': 'Injects Android-compiled Rapier natives into Sable.',
-            'license': 'Polyform-Shield-1.0.0',
-            'environment': '*',
+            'license': 'Polyform-Shield-1.0.0',            'environment': '*',
             'mixins': ['sableandroidlibs-fabric.mixins.json'],
             'depends': {
               'sable': os.environ['SABLE_VERSION'],
@@ -399,6 +402,17 @@ jobs:
           with open('sable-android-libs/fabric/src/main/resources/fabric.mod.json', 'w') as f:
               json.dump(data, f, indent=2)
           "
+
+      - name: Force .so files to be stored uncompressed in JAR
+        run: |
+          cat >> sable-android-libs/fabric/build.gradle << 'GRADLE_EOF'
+
+          tasks.withType(Jar).configureEach {
+              filesMatching("**/*.so") {
+                  entryCompression = ZipEntryCompression.STORED
+              }
+          }
+          GRADLE_EOF
 
       - name: Build Fabric jar
         run: |
