@@ -12,6 +12,10 @@ on:
         required: true
         default: '1.21.1'
 
+env:
+  # Silences the Node.js 20 deprecation warnings by forcing actions to Node 24
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build-native:
     runs-on: ubuntu-latest
@@ -19,7 +23,6 @@ jobs:
     steps:
       - name: Discover and Checkout Sable Tag
         run: |
-          # Manually fetch tags to handle fuzzy matching for naming differences
           git init
           git remote add origin https://github.com/ryanhcode/sable.git
           git fetch --tags origin
@@ -278,6 +281,12 @@ jobs:
           SABLE_VERSION: ${{ github.event.inputs.sable_version }}
           MC_VERSION: ${{ github.event.inputs.minecraft_version }}
         run: |
+          if [[ "${SABLE_VERSION}" == *"+"* ]]; then
+            FULL_VERSION="${SABLE_VERSION}"
+          else
+            FULL_VERSION="${SABLE_VERSION}+mc${MC_VERSION}"
+          fi
+
           mkdir -p sable-android-libs/neoforge/src/main/resources/META-INF
           cat > sable-android-libs/neoforge/src/main/resources/META-INF/neoforge.mods.toml << EOF
           modLoader="javafml"
@@ -286,14 +295,14 @@ jobs:
 
           [[mods]]
           modId="sableandroidlibs"
-          version="${SABLE_VERSION}"
+          version="${FULL_VERSION}"
           displayName="Sable Android Libs"
           description="Injects Android-compiled Rapier natives into Sable."
 
           [[dependencies.sableandroidlibs]]
           modId="sable"
           type="required"
-          versionRange="[${SABLE_VERSION},${SABLE_VERSION}]"
+          versionRange="[${FULL_VERSION},${FULL_VERSION}]"
           ordering="AFTER"
           side="BOTH"
 
@@ -315,13 +324,18 @@ jobs:
       - name: Build NeoForge jar
         run: |
           cd sable-android-libs
-          gradle neoforge:build
+          chmod +x gradlew
+          ./gradlew neoforge:build
 
       - name: Upload NeoForge jar
         uses: actions/upload-artifact@v4
         with:
-          name: sable-android-libs-neoforge-${{ github.event.inputs.sable_version }}-mc${{ github.event.inputs.minecraft_version }}
-          path: sable-android-libs/neoforge/build/libs/*.jar
+          name: sable-android-libs-neoforge
+          path: |
+            sable-android-libs/neoforge/build/libs/*.jar
+            !sable-android-libs/neoforge/build/libs/*-dev.jar
+            !sable-android-libs/neoforge/build/libs/*-sources.jar
+          if-no-files-found: error
 
   build-fabric:
     runs-on: ubuntu-latest
@@ -380,19 +394,23 @@ jobs:
           mkdir -p sable-android-libs/fabric/src/main/resources
           python3 -c "
           import json, os
+          v_in = os.environ['SABLE_VERSION']
+          mc_in = os.environ['MC_VERSION']
+          full_v = v_in if '+' in v_in else f'{v_in}+mc{mc_in}'
+          
           data = {
             'schemaVersion': 1,
             'id': 'sableandroidlibs',
-            'version': os.environ['SABLE_VERSION'],
+            'version': full_v,
             'name': 'Sable Android Libs',
             'description': 'Injects Android-compiled Rapier natives into Sable.',
             'license': 'Polyform-Shield-1.0.0',
             'environment': '*',
             'mixins': ['sableandroidlibs-fabric.mixins.json'],
             'depends': {
-              'sable': os.environ['SABLE_VERSION'],
+              'sable': full_v,
               'fabricloader': '>=0.15.0',
-              'minecraft': os.environ['MC_VERSION']
+              'minecraft': mc_in
             },
             'loadAfter': [{'id': 'sable'}]
           }
@@ -403,10 +421,15 @@ jobs:
       - name: Build Fabric jar
         run: |
           cd sable-android-libs
-          gradle fabric:build
+          chmod +x gradlew
+          ./gradlew fabric:build
 
       - name: Upload Fabric jar
         uses: actions/upload-artifact@v4
         with:
-          name: sable-android-libs-fabric-${{ github.event.inputs.sable_version }}-mc${{ github.event.inputs.minecraft_version }}
-          path: sable-android-libs/fabric/build/libs/*.jar
+          name: sable-android-libs-fabric
+          path: |
+            sable-android-libs/fabric/build/libs/*.jar
+            !sable-android-libs/fabric/build/libs/*-dev.jar
+            !sable-android-libs/fabric/build/libs/*-sources.jar
+          if-no-files-found: error
