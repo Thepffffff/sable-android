@@ -323,7 +323,6 @@ jobs:
 
       - name: Build NeoForge jar
         run: |
-          cd sable-android-libs
           chmod +x gradlew
           ./gradlew neoforge:build
 
@@ -420,7 +419,6 @@ jobs:
 
       - name: Build Fabric jar
         run: |
-          cd sable-android-libs
           chmod +x gradlew
           ./gradlew fabric:build
 
