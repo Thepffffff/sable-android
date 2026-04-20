@@ -278,12 +278,6 @@ jobs:
           SABLE_VERSION: ${{ github.event.inputs.sable_version }}
           MC_VERSION: ${{ github.event.inputs.minecraft_version }}
         run: |
-          NEXT_VERSION=$(python3 -c "
-          v = '${SABLE_VERSION}'.split('.')
-          v[-1] = str(int(v[-1]) + 1)
-          print('.'.join(v))
-          ")
-
           mkdir -p sable-android-libs/neoforge/src/main/resources/META-INF
           cat > sable-android-libs/neoforge/src/main/resources/META-INF/neoforge.mods.toml << EOF
           modLoader="javafml"
@@ -299,7 +293,7 @@ jobs:
           [[dependencies.sableandroidlibs]]
           modId="sable"
           type="required"
-          versionRange="[${SABLE_VERSION},${NEXT_VERSION})"
+          versionRange="[${SABLE_VERSION}]"
           ordering="AFTER"
           side="BOTH"
 
