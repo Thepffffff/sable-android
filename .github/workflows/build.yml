@@ -19,14 +19,12 @@ jobs:
     steps:
       - name: Discover and Checkout Sable Tag
         run: |
-          # Manually fetch tags to handle fuzzy matching for naming differences
           git init
           git remote add origin https://github.com/ryanhcode/sable.git
           git fetch --tags origin
           
           VERSION_INPUT="${{ github.event.inputs.sable_version }}"
           
-          # Prioritize exact match/standard prefix, then fallback to any tag containing the string
           MATCHED_TAG=$(git tag -l | grep -E "^v?${VERSION_INPUT}([-+]|$)" | head -n 1)
           if [ -z "$MATCHED_TAG" ]; then
             MATCHED_TAG=$(git tag -l | grep "${VERSION_INPUT}" | head -n 1)
@@ -218,6 +216,16 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
+      - name: Find and copy native manually
+        run: |
+          echo "Searching for libsable_rapier.so..."
+          find . -name "libsable_rapier.so" 2>/dev/null
+          mkdir -p common/src/main/resources/natives/sable_rapier
+          FOUND=$(find . -name "libsable_rapier.so" -path "*/aarch64-linux-android/*" | head -n 1)
+          echo "Found at: $FOUND"
+          cp "$FOUND" common/src/main/resources/natives/sable_rapier/sable_rapier_aarch64_linux.so
+          echo "Copied successfully."
+
       - name: Upload native as artifact
         uses: actions/upload-artifact@v4
         with:
@@ -293,7 +301,7 @@ jobs:
           [[dependencies.sableandroidlibs]]
           modId="sable"
           type="required"
-          versionRange="[${SABLE_VERSION}]"
+          versionRange="[${SABLE_VERSION},${SABLE_VERSION}]"
           ordering="AFTER"
           side="BOTH"
 
